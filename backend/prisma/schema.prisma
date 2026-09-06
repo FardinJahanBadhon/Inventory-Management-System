@@ -1,0 +1,120 @@
+// Prisma schema — Phase 3 (Database Implementation)
+//
+// This schema implements the five core entities from the database design
+// document: LocationCategory, Location, User, Product, Inventory.
+//
+// The single most important rule enforced (or rather, deliberately NOT
+// enforced) here: Inventory is never unique by (productId, locationId).
+// Multiple Inventory rows for the same product at the same location are
+// valid and expected — see PROJECT_RULES.md rule #5. Do not add a unique
+// constraint on that pair.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Fixed, application-controlled classification of a Location. Not a
+// user-maintained table — there is no requirement for configurable
+// categories, so an enum keeps the five values closed and type-safe.
+enum LocationCategory {
+  ADMINISTRATION
+  STORE
+  LAB
+  WARD
+  PHARMACY
+}
+
+// A physical/organizational place (e.g. Administration Office, a Store, a
+// Ward). Exactly one of these, with category = ADMINISTRATION, must always
+// exist and stay active — see the bootstrap logic in prisma/seed.ts.
+//
+// `category` is intentionally NOT unique: multiple STORE/LAB/WARD/PHARMACY
+// locations are expected (Store A, Store B, ... are all valid). The
+// Administration Office singleton invariant is enforced by the bootstrap
+// process (application logic), not by a database uniqueness constraint on
+// category — see PROJECT_RULES.md and the seed script for why.
+model Location {
+  id        String           @id @default(uuid())
+  name      String
+  category  LocationCategory
+  isActive  Boolean          @default(true)
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  users       User[]
+  inventories Inventory[]
+
+  @@index([category])
+  @@index([isActive])
+}
+
+// A login account. Every user belongs to exactly one Location for its
+// entire lifetime — `locationId` is required and there is no update path
+// that changes it (enforced at the service layer in later phases; the
+// database enforces only that it can never be null or dangling).
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  username     String   @unique
+  passwordHash String
+  locationId   String
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  location Location @relation(fields: [locationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([locationId])
+  @@index([isActive])
+}
+
+// Global product master data. Holds no location or quantity information —
+// that lives exclusively on Inventory. Deactivate (isActive = false)
+// instead of deleting once a product has operational history.
+model Product {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  name      String
+  unit      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  inventories Inventory[]
+
+  @@index([name])
+  @@index([isActive])
+}
+
+// A quantity of one Product held at one Location. Deliberately NOT unique
+// on (productId, locationId) — see the module header comment and
+// PROJECT_RULES.md rule #5. A location's total for a product is always
+// computed as SUM(quantity) across matching rows, never read from a single
+// row.
+//
+// `quantity` is non-negative by construction: every write path (Initialize
+// only ever inserts a positive amount; Distribute/Trash only ever decrement
+// under a `WHERE quantity >= requested` guard — see Phase 1 §15) keeps it
+// so, and a database CHECK constraint (added by hand in the initial
+// migration, since the Prisma schema DSL has no first-class syntax for
+// arbitrary CHECK constraints) backs that up as a last line of defense.
+model Inventory {
+  id         String   @id @default(uuid())
+  productId  String
+  locationId String
+  quantity   Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  location Location @relation(fields: [locationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([locationId])
+  @@index([productId])
+  @@index([locationId, productId])
+}
