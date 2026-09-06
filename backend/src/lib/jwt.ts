@@ -10,6 +10,7 @@ import type { AuthenticatedUser } from "../shared/types/auth";
 // is rejected instead of silently producing a malformed AuthenticatedUser.
 const accessTokenPayloadSchema = z.object({
   userId: z.string().uuid(),
+  username: z.string().min(1),
   locationId: z.string().uuid(),
   locationCategory: z.enum(LocationCategory),
 });

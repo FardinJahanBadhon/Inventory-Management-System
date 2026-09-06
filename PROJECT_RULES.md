@@ -95,12 +95,41 @@ would violate one of these rules, stop and raise it instead of proceeding.
   `validateRequest()`'s query schema output is exposed as
   `req.validatedQuery` instead; read that, not `req.query`, in any
   controller behind a query schema.
-- The JWT payload is exactly `{ userId, locationId, locationCategory }`
+- The JWT payload is exactly `{ userId, username, locationId, locationCategory }`
   (`AuthenticatedUser` in `src/shared/types/auth.ts`). Never add
   `password`, `passwordHash`, or other personal data to it.
 - `prisma/seed.ts` intentionally does not import `src/config` — it is a
   standalone process with its own minimal env validation, separate from the
   Express app's runtime config.
+
+## Authentication Conventions (Phase 5)
+
+- Login (`auth-service.ts`) returns the exact same error (generic message,
+  401, `UNAUTHORIZED`) whether the username doesn't exist, the password is
+  wrong, or the account is deactivated. Never add a more specific message
+  for any of these three cases — that would let a caller enumerate valid
+  usernames or account states.
+- **No token revocation system exists.** A JWT remains valid for
+  `JWT_EXPIRES_IN` regardless of what happens to the account afterward,
+  with one deliberate exception: `GET /api/auth/me` re-reads the user from
+  the database on every call (via `getAuthenticatedUserProfile`) and
+  rejects the request if the account has been deactivated since the token
+  was issued. This re-check lives in that one service function, **not**
+  inside `authenticateRequest` — every other protected endpoint (Phase 6
+  onward) authenticates purely from the JWT's claims and does not hit the
+  database on every request. Do not silently add a global re-check into
+  `authenticateRequest` — that changes the performance/architecture
+  trade-off for every future module and should be a deliberate decision if
+  ever revisited, not an incidental one.
+- `modules/auth/auth-repository.ts` is a narrow, auth-scoped data-access
+  file (`findUserByUsernameWithLocation`, `findUserByIdWithLocation`) — it
+  exists because the Users module (Phase 7) doesn't yet have its own
+  repository to reuse. When Phase 7 builds `modules/users/user-repository.ts`,
+  reconsider whether auth should import from there instead of keeping its
+  own copy; don't let both grow independently by accident.
+- Only `findUserByUsernameWithLocation` (used by login) ever selects
+  `passwordHash`. `findUserByIdWithLocation` (used by `/me`) never does —
+  session/profile reads have no reason to touch the hash at all.
 
 ## Engineering Conventions
 

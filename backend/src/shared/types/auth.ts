@@ -8,6 +8,7 @@ import type { LocationCategory } from "@prisma/client";
 // checks) are allowed to read a user's location from.
 export interface AuthenticatedUser {
   userId: string;
+  username: string;
   locationId: string;
   locationCategory: LocationCategory;
 }

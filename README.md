@@ -5,16 +5,13 @@ controls master data (locations, users, products) and initializes stock;
 operational locations (Store, Lab, Ward, Pharmacy) can only view their own
 inventory and reduce it through Distribution or Trash.
 
-> **Current phase: Phase 4 — Backend Foundation.**
-> The Express application now has its full cross-cutting foundation:
-> centralized error handling, a consistent `{success, message, data}`
-> response envelope, Zod request validation middleware, JWT
-> sign/verify and bcrypt hashing utilities, and authentication/authorization
-> middleware (`authenticateRequest`, `requireAdministrationAccess`,
-> `requireOperationalLocationAccess`). Every module route (`/api/auth`,
-> `/api/users`, `/api/locations`, `/api/products`, `/api/inventory`) is
-> mounted but still empty — no login, no CRUD, no inventory operations yet.
-> Those are implemented starting Phase 5. See [PROJECT_RULES.md](PROJECT_RULES.md)
+> **Current phase: Phase 5 — Authentication.**
+> `POST /api/auth/login` and `GET /api/auth/me` are now implemented and
+> enforced entirely server-side: bcrypt password verification, JWT
+> issuance/verification, and location/category context sourced only from
+> the database and the verified token — never from client input. Locations,
+> users, products, and inventory still have no CRUD or business endpoints;
+> those are implemented starting Phase 6. See [PROJECT_RULES.md](PROJECT_RULES.md)
 > for the non-negotiable business and engineering rules driving this build.
 
 ## 1. Technology Stack
@@ -230,20 +227,70 @@ this shape by the centralized error handler
 (`backend/src/middlewares/error-handler.ts`); no endpoint returns a raw
 stack trace or an ad hoc error shape.
 
-## 12. Authentication and Authorization Foundation
+## 12. Authentication
 
-As of Phase 4, the JWT/bcrypt infrastructure and the authorization
-middleware exist, but there is no login endpoint yet — that's Phase 5.
-What's in place now:
+### `POST /api/auth/login` — public
 
-- `backend/src/lib/jwt.ts` — `signAccessToken` / `verifyAccessToken`
+```bash
+curl -X POST http://localhost:4000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"<ADMIN_PASSWORD from backend/.env>"}'
+```
+
+```json
+{
+  "success": true,
+  "message": "Login successful",
+  "data": {
+    "accessToken": "<JWT>",
+    "user": {
+      "id": "...",
+      "username": "admin",
+      "name": "System Administrator",
+      "location": { "id": "...", "name": "Administration Office", "category": "ADMINISTRATION" }
+    }
+  }
+}
+```
+
+Wrong password, unknown username, and a deactivated account all return the
+same `401` with the same generic message
+(`"Invalid username or password"`) — the API never reveals which one it
+was.
+
+### `GET /api/auth/me` — protected
+
+```bash
+curl http://localhost:4000/api/auth/me -H "Authorization: Bearer <JWT>"
+```
+
+Returns the same safe user/location shape as login's `data.user`. Identity
+comes only from the verified JWT — there is no way to request another
+user's profile.
+
+### How authentication works
+
+- `backend/src/lib/jwt.ts` — `signAccessToken` / `verifyAccessToken` (JWT
+  payload: `userId`, `username`, `locationId`, `locationCategory` — never a
+  password or password hash)
 - `backend/src/lib/password.ts` — `hashPassword` / `comparePassword` (bcrypt)
 - `backend/src/middlewares/authenticate.ts` — `authenticateRequest` verifies
-  a `Bearer` JWT and attaches `req.user = { userId, locationId, locationCategory }`,
-  sourced only from the token's verified claims
-- `backend/src/middlewares/authorize.ts` — `requireAdministrationAccess` and
-  `requireOperationalLocationAccess`, the coarse category-based gate every
-  admin-only / operational-only route will use once it exists
+  a `Bearer` JWT and attaches `req.user`, sourced only from the token's
+  verified claims — never from the request body, query string, or URL
+- `backend/src/middlewares/authorize.ts` — `requireAdministrationAccess` /
+  `requireOperationalLocationAccess`, the coarse category-based gate used
+  starting with each module's own routes from Phase 6 onward
+- **No token revocation / refresh system**: a JWT is valid for
+  `JWT_EXPIRES_IN` (default 8h) regardless of what happens to the account
+  afterward, with one exception — `GET /api/auth/me` re-reads the user from
+  the database on every call and rejects the request if the account has
+  since been deactivated. Other endpoints (once they exist, from Phase 6
+  on) authenticate purely from the JWT and do not re-check `isActive` on
+  every request; a deactivated user's access to those ends at token expiry,
+  not immediately. This is a deliberate scope decision (see
+  PROJECT_RULES.md), not an oversight.
+- There is no `POST /api/auth/register` — users are created only by
+  Administration (Phase 7).
 
 ## 13. Project Phases
 
@@ -253,8 +300,8 @@ This project is being built incrementally. Completed so far:
 - [x] Phase 1 — Architecture & Technical Design
 - [x] Phase 2 — Project Initialization
 - [x] Phase 3 — Database Implementation
-- [x] Phase 4 — Backend Foundation (this phase)
-- [ ] Phase 5 — Auth Module
+- [x] Phase 4 — Backend Foundation
+- [x] Phase 5 — Authentication (this phase)
 - [ ] Phase 6 — Location Module
 - [ ] Phase 7 — User Module
 - [ ] Phase 8 — Product Module
