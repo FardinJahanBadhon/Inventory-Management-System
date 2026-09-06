@@ -131,6 +131,39 @@ would violate one of these rules, stop and raise it instead of proceeding.
   `passwordHash`. `findUserByIdWithLocation` (used by `/me`) never does —
   session/profile reads have no reason to touch the hash at all.
 
+## Location Management Conventions (Phase 6)
+
+- The Administration Office invariant is enforced by **checking `category`,
+  not `name`**: whichever `Location` currently has
+  `category = ADMINISTRATION` is, by construction, the Administration
+  Office (the database's partial unique index guarantees at most one such
+  row exists — see the Database Implementation Notes above). An update is
+  rejected if it would set that row's `isActive` to `false` or change its
+  `category` away from `ADMINISTRATION`, regardless of what else is in the
+  same request — a combined "rename + deactivate" request is rejected in
+  full, with **no partial effect**, verified during Phase 6 testing.
+- **A pure rename of the Administration Office is allowed.** Its `name`
+  has no bearing on the invariant ("one active ADMINISTRATION location
+  exists") — only `category` and `isActive` do. Do not add a name-lock on
+  this row; it isn't required by the source specification and isn't needed
+  to preserve the invariant.
+- `Location.name` is **not unique** — the Phase 3 schema has no such
+  constraint, and Phase 6 preserves that; duplicate location names are
+  valid. Do not add a uniqueness rule for it without a genuine requirement.
+- Promoting a non-Administration location to `category: ADMINISTRATION`
+  (via `PATCH`) is subject to the same singleton check as creating one —
+  both paths call `assertNoExistingAdministrationLocation()` in
+  `location-service.ts` before ever reaching the database, so the failure
+  is a clear `409 Conflict` rather than a raw unique-constraint error.
+- There is no `DELETE /api/locations/:id`. Locations are never
+  hard-deleted; lifecycle ends via `PATCH { isActive: false }` (blocked
+  only for the Administration Office).
+- List/filter/search endpoints share `shared/utils/pagination.ts`
+  (`paginationQuerySchema`, `toSkipTake`, `buildPaginationMeta`) and the
+  `PaginatedData<T>` response shape in `shared/types/api.ts` — reuse these
+  for Users, Products, and Inventory listing (Phase 7 onward) rather than
+  reimplementing pagination per module.
+
 ## Engineering Conventions
 
 - Files and folders: kebab-case (`inventory-service.ts`, `location-management/`).

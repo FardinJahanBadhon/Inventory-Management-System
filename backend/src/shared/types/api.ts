@@ -17,3 +17,18 @@ export interface ApiErrorResponse {
     details?: unknown;
   };
 }
+
+export interface PaginationMeta {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+// The `data` shape for every paginated list endpoint (locations now; users,
+// products, and inventory from Phase 7 onward), so a client can rely on
+// `data.items` / `data.meta` regardless of which resource it's listing.
+export interface PaginatedData<T> {
+  items: T[];
+  meta: PaginationMeta;
+}

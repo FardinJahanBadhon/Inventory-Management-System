@@ -5,13 +5,11 @@ controls master data (locations, users, products) and initializes stock;
 operational locations (Store, Lab, Ward, Pharmacy) can only view their own
 inventory and reduce it through Distribution or Trash.
 
-> **Current phase: Phase 5 — Authentication.**
-> `POST /api/auth/login` and `GET /api/auth/me` are now implemented and
-> enforced entirely server-side: bcrypt password verification, JWT
-> issuance/verification, and location/category context sourced only from
-> the database and the verified token — never from client input. Locations,
-> users, products, and inventory still have no CRUD or business endpoints;
-> those are implemented starting Phase 6. See [PROJECT_RULES.md](PROJECT_RULES.md)
+> **Current phase: Phase 6 — Location Management.**
+> Full Administration-only CRUD for locations now exists (`/api/locations`),
+> including search/filter/pagination and Administration Office protection.
+> Users, products, and inventory still have no business endpoints; those
+> are implemented starting Phase 7. See [PROJECT_RULES.md](PROJECT_RULES.md)
 > for the non-negotiable business and engineering rules driving this build.
 
 ## 1. Technology Stack
@@ -292,7 +290,58 @@ user's profile.
 - There is no `POST /api/auth/register` — users are created only by
   Administration (Phase 7).
 
-## 13. Project Phases
+## 13. Location Management
+
+All endpoints require `Authorization: Bearer <JWT>` **and** an
+Administration-category account — an operational user gets `403` on every
+one of them, unauthenticated requests get `401`.
+
+```
+POST   /api/locations        create a location
+GET    /api/locations        list locations (search, filter, paginate)
+GET    /api/locations/:id    get one location
+PATCH  /api/locations/:id    update name / category / isActive
+```
+
+There is no `DELETE` — locations are deactivated (`PATCH { "isActive": false }`),
+never hard-deleted.
+
+### Create
+
+```bash
+curl -X POST http://localhost:4000/api/locations \
+  -H "Authorization: Bearer <ADMIN_JWT>" -H "Content-Type: application/json" \
+  -d '{"name":"Central Store","category":"STORE"}'
+```
+
+`category` must be one of `ADMINISTRATION`, `STORE`, `LAB`, `WARD`,
+`PHARMACY` — anything else is a `422`. `isActive` defaults to `true` if
+omitted.
+
+### List, search, and filter
+
+```bash
+curl "http://localhost:4000/api/locations?search=central&category=STORE&isActive=true&page=1&pageSize=20" \
+  -H "Authorization: Bearer <ADMIN_JWT>"
+```
+
+`search` matches `name` (case-insensitive, partial match). All filters
+combine with AND. The response shape is
+`{ success, message, data: { items: [...], meta: { page, pageSize, total, totalPages } } }`.
+
+### The Administration Office invariant
+
+The Location whose `category` is `ADMINISTRATION` (there is always exactly
+one — enforced by a database partial unique index, see PROJECT_RULES.md)
+cannot be deactivated or have its category changed away from
+`ADMINISTRATION`, even as part of a larger update that also changes other
+fields — the whole request is rejected (`409 Conflict`), with **no partial
+effect**. Renaming it is allowed; only its `category`/`isActive` are
+protected. Attempting to create a second `ADMINISTRATION`-category
+location (or promote an existing one to it) is likewise rejected with
+`409`.
+
+## 14. Project Phases
 
 This project is being built incrementally. Completed so far:
 
@@ -301,8 +350,8 @@ This project is being built incrementally. Completed so far:
 - [x] Phase 2 — Project Initialization
 - [x] Phase 3 — Database Implementation
 - [x] Phase 4 — Backend Foundation
-- [x] Phase 5 — Authentication (this phase)
-- [ ] Phase 6 — Location Module
+- [x] Phase 5 — Authentication
+- [x] Phase 6 — Location Management (this phase)
 - [ ] Phase 7 — User Module
 - [ ] Phase 8 — Product Module
 - [ ] Phase 9 — Inventory Module
