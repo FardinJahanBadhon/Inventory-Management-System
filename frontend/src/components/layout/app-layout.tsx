@@ -14,7 +14,7 @@ export function AppLayout() {
   return (
     <div className="flex min-h-screen flex-col">
       <Header />
-      <div className="flex flex-1">
+      <div className="flex flex-1 flex-col md:flex-row">
         <Sidebar items={getVisibleNavItems(locationCategory)} />
         <main className="min-w-0 flex-1 p-6">
           <Outlet />

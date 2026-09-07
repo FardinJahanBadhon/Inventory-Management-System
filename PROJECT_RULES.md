@@ -556,6 +556,36 @@ would violate one of these rules, stop and raise it instead of proceeding.
   race-winner assertions. Not a Phase 14 change in substance, but noted
   here since it's how it was found.
 
+## Final Audit Notes (Phase 16)
+
+- **The Sidebar was completely hidden below the `md` breakpoint from
+  Phase 11 through Phase 15** (`className="hidden ... md:block"`), on the
+  reasoning that a 224px-wide vertical rail has no room next to real
+  content at phone width. That reasoning was correct, but the
+  consequence — verified with an actual 375px-viewport screenshot during
+  this phase's audit, not assumed — was that a phone-width user had **no
+  way to navigate between pages at all** apart from typing a URL
+  directly; every route was still reachable, but not from the UI. Fixed
+  by making `Sidebar` render as a horizontally-scrollable bar below `md`
+  and a normal vertical rail at `md` and up (`app-layout.tsx`'s
+  container gained `flex-col md:flex-row` to match) — CSS-only, no new
+  component, no dependency, and confirmed not to change anything at
+  desktop width (still a fixed ~224px column). This is the only code
+  defect this phase's audit found; every other check (security,
+  authorization, mass assignment, dependency, database, RTK Query,
+  concurrency) confirmed prior phases' work rather than uncovering
+  anything new to fix.
+- **`npm audit`**: backend still reports exactly the pre-existing
+  `deepmerge-ts`/`@prisma/config` high-severity advisory documented in
+  Known, Accepted Dependency Notes below — unchanged in nature, severity,
+  or reachability since it was first documented. Frontend reports zero
+  vulnerabilities. No dependency changes were made this phase.
+- Nothing else in this phase changed application code — the rest of the
+  effort was verification (backend test suite re-run three times
+  consecutively for stability, full mass-assignment/IDOR/JWT-edge-case
+  review against the actual source, mobile-viewport and keyboard-only
+  accessibility checks) rather than new fixes.
+
 ## Engineering Conventions
 
 - Files and folders: kebab-case (`inventory-service.ts`, `location-management/`).

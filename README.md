@@ -5,15 +5,14 @@ controls master data (locations, users, products) and initializes stock;
 operational locations (Store, Lab, Ward, Pharmacy) can only view their own
 inventory and reduce it through Distribution or Trash.
 
-> **Current phase: Phase 14 — Operational UI.**
-> The backend (Phases 4-10), frontend foundation (Phase 11, §18),
-> authentication/session layer (Phase 12, §19), and Admin UI (Phase 13,
-> §20) are all fully implemented and verified. Phase 14 adds the
-> Operational interface — one Dashboard and one Inventory page (view,
-> Distribute, Trash) shared by STORE, LAB, WARD, and PHARMACY alike — at
-> its own `/operations/*` routes, gated to those four categories. See §21
-> below. Every frontend phase (0-14) is now complete; only Phase 15 (full
-> integration) and Phase 16 (final quality check) remain. See
+> **Status: Complete (Phase 16 — Final Testing, Security & Cleanup).**
+> All sixteen phases are done. Backend (Phases 4-10), frontend foundation
+> (Phase 11, §18), authentication/session (Phase 12, §19), Admin UI
+> (Phase 13, §20), and Operational UI (Phase 14, §21) were each verified
+> in isolation; Phase 15 (§22) exercised them together as one system.
+> Phase 16 performed a final security/quality audit against the actual
+> source (mass assignment, IDOR, JWT edge cases, dependency audit,
+> mobile/accessibility) — see §23 below for what it found and fixed. See
 > [PROJECT_RULES.md](PROJECT_RULES.md) for the non-negotiable business and
 > engineering rules driving this build.
 
@@ -1041,7 +1040,160 @@ Phase 12 session-expiry handling (clear token, clear session, redirect to
 `/login`) already verified for the Admin UI — nothing operational-specific
 was added to that mechanism.
 
-## 22. Project Phases
+## 22. Full System Integration
+
+Phase 15 did not add new endpoints, routes, or UI — it exercised every
+module built in Phases 4-14 together, end to end, against the real
+backend and PostgreSQL database (no manually-edited rows anywhere), and
+fixed what it found. No architectural changes were needed.
+
+### What was verified, in one continuous session per role
+
+**Administration**: login → create a `STORE` location and a `LAB`
+location → create a user in each (category correctly derived from the
+assigned location, not client input) → create a product → initialize
+inventory for it at the `STORE` location twice (`100`, then `50`) →
+confirm both rows exist independently (never merged — Product + Location
+is still not unique) → initialize once more at the `LAB` location →
+logout. Every list update happened live, via RTK Query cache
+invalidation — no browser refresh anywhere in the journey.
+
+**Operational** (the `STORE` user created above): login → correct
+`/operations/dashboard` redirect and context → Inventory shows only this
+location's records → Distribute `20` (`100 → 80`) → Trash `10`
+(`80 → 70`), through its confirmation step → both updates reflected
+immediately, no reload → client-side quantity-boundary validation (`0`,
+negative, and over-available all rejected before any request) → the
+same over-available quantity sent directly to the API (bypassing the UI)
+independently rejected with `400` → logout.
+
+### Beyond the individual per-phase reports
+
+A few things Phase 15 checked that no earlier phase's own verification
+had exercised in isolation:
+
+- **User reassignment**: reassigning the `STORE` user to the `LAB`
+  location via the Admin UI, then logging that user out and back in,
+  correctly shows `LAB` everywhere (header, nav, inventory scope) — no
+  stale `STORE` state survives a fresh login (logout resets the entire
+  RTK Query cache; a new login is always a real `POST /api/auth/login`
+  call, never a client-side patch).
+- **Location deactivation**: deactivating a location through the Admin
+  UI leaves any user still assigned to it fully functional — they can
+  still log in and use their inventory normally, per the deliberate
+  "no restriction" decision recorded in PROJECT_RULES.md (Business Rules
+  above never required otherwise).
+- **Product deactivation**: deactivating a product that already has
+  inventory initialized against it leaves every existing `Inventory` row
+  intact, still resolving the product's full name/unit/code via the API
+  — never a dangling or nulled reference.
+- **Concurrency, exercised again in this integrated context** (not just
+  Phase 9's isolated backend suite): two genuinely simultaneous
+  `60` + `50` distribute requests against a `100`-quantity row, fired
+  through the same code path the UI itself uses, produced exactly one
+  `200`, one `400`, and a final quantity matching whichever request
+  actually won — never negative, never double-applied.
+- **Cross-location and location-switch attempts**, from a live
+  `STORE` session's real token: reading another location's inventory by
+  manipulating the `locationId` query parameter returned only the
+  caller's own records (the parameter is silently ignored for any
+  non-`ADMINISTRATION` caller); `GET /api/locations` itself — not just
+  the write endpoints — rejected the operational token with `403`,
+  confirming that module is Administration-only end to end, not merely
+  for mutations.
+- **Deep-route refresh and direct URL entry**: refreshing the browser
+  while sitting on a non-landing protected route (`/users` for Admin,
+  `/operations/inventory` for Operational) restores the session and
+  stays on that exact route — no redirect loop, no bounce to `/login`.
+  Direct URL entry to the other role's routes (`/inventory` as
+  operational, `/operations/*` as Administration) is rejected by
+  `/unauthorized` regardless of how the URL was reached.
+
+### Defects found
+
+None required a code change this phase. One test-only defect discovered
+during Phase 14's own regression pass (`inventory-concurrency.test.ts`
+asserting a hardcoded race winner) was already fixed and documented
+there — see Testing Conventions (Phase 10) in PROJECT_RULES.md. Phase 15
+re-ran the full backend suite three times consecutively to confirm that
+fix holds (135/135 every time) and found nothing new.
+
+## 23. Final Testing, Security & Cleanup
+
+Phase 16 audited the finished system as a production candidate — reading
+the actual source rather than re-trusting earlier phases' own reports —
+and fixed what it found. No new features, no redesign.
+
+### Security audit (all against actual source/live behavior, not assumed)
+
+- **Mass assignment**: every backend create/update handler passes only a
+  Zod-parsed, narrowly-typed object into Prisma — `validateRequest`
+  replaces `req.body` with `schema.parse(req.body)` before any controller
+  runs, and Zod strips unknown keys by default. Confirmed no handler
+  spreads a raw request body into a Prisma call; the one `...data` spread
+  in the codebase (`product-repository.ts`'s `createProduct`) spreads an
+  already-validated, explicitly-typed `{code, name, unit}` object, never
+  `req.body` itself.
+- **JWT edge cases**: missing header, malformed `Bearer` value,
+  syntactically invalid token, expired token, wrong signing secret
+  (forgery), and a token missing required claims are all covered by
+  `tests/integration/auth.test.ts` and pass.
+- **IDOR / privilege escalation**: `tests/integration/security.test.ts`
+  covers header/body injection of `locationId`/category/role (no effect),
+  horizontal escalation within the same operational category (a Store
+  user can't act on a different Store location's inventory just because
+  the category matches), and vertical escalation (reassigning a user's
+  location doesn't retroactively upgrade an already-issued JWT) — all
+  passing, all pre-existing from Phase 10. This phase additionally
+  confirmed live that `GET /api/locations`/`GET /api/products` reject an
+  operational token outright — Administration-only for reads, not just
+  writes.
+- **Password/secret hygiene**: repository-wide search found zero
+  hardcoded credentials, zero secrets in tracked files, `passwordHash`
+  selected only by the two auth-repository functions that need it
+  (`user-repository.ts`'s general queries never select it), and exactly
+  one file (`auth-storage.ts`) touches `localStorage` anywhere in the
+  frontend.
+- **Error handling**: `error-handler.ts` maps every Prisma error class to
+  a generic safe response and logs full detail (`err.stack`)
+  server-side only — confirmed by reading the handler directly, not just
+  the tests.
+
+### Fixed this phase
+
+- **Mobile navigation was completely inaccessible below the `md`
+  breakpoint** — `Sidebar` was `hidden md:block` since Phase 11, verified
+  with an actual 375px-viewport screenshot to still be true through
+  Phase 15. Every route remained reachable by URL, but nothing in the UI
+  let a phone-width user get to it. Fixed: `Sidebar` now renders as a
+  horizontally-scrollable bar below `md` and the usual vertical rail at
+  `md` and up; `app-layout.tsx`'s container gained `flex-col md:flex-row`
+  to match. CSS-only — confirmed unchanged at desktop width (still a
+  fixed ~224px column) and confirmed working via a fresh mobile
+  screenshot. See Final Audit Notes (Phase 16) in PROJECT_RULES.md.
+
+### Verified, nothing to fix
+
+Backend suite (135 tests) re-run three consecutive times for stability;
+`npm audit` on both workspaces (see below); keyboard-only login
+(Tab-order through username → password → submit, Enter to submit);
+dialog accessibility (`role="dialog"`, closes on Escape); semantic
+`<table>`/`<th>` structure; status conveyed by text as well as color.
+
+### Dependency audit
+
+```
+backend:  3 high-severity findings — all deepmerge-ts / @prisma/config,
+          the same pre-existing, dev-only, CLI-only advisory documented
+          in PROJECT_RULES.md since early in the project. Unchanged in
+          nature, severity, or reachability. Not bundled into the
+          runtime @prisma/client.
+frontend: 0 vulnerabilities.
+```
+
+No dependency versions were changed this phase.
+
+## 24. Project Phases
 
 This project is being built incrementally. Completed so far:
 
@@ -1059,6 +1211,6 @@ This project is being built incrementally. Completed so far:
 - [x] Phase 11 — Frontend Foundation
 - [x] Phase 12 — Authentication UI & Session Management
 - [x] Phase 13 — Admin UI
-- [x] Phase 14 — Operational User UI (this phase)
-- [ ] Phase 15 — Integration
-- [ ] Phase 16 — Final Quality Check
+- [x] Phase 14 — Operational User UI
+- [x] Phase 15 — Integration
+- [x] Phase 16 — Final Quality Check (this phase — project complete)
