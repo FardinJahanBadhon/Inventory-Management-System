@@ -44,7 +44,13 @@ describe("Inventory concurrency safety", () => {
     const finalQuantity = finalCheck.body.data.items[0].quantity;
 
     expect(finalQuantity).toBeGreaterThanOrEqual(0);
-    expect(finalQuantity).toBe(30); // 100 - 70, since only the 70 could fit
+    // Both 70 and 50 individually fit within 100 — it's only their SUM
+    // (120) that doesn't. Which one's UPDATE commits first (and therefore
+    // wins) is a genuine race with no guaranteed winner, so the expected
+    // remaining quantity must be derived from whichever one actually
+    // succeeded, not hardcoded to assume the 70 always wins.
+    const winningQuantity = resultA.status === 200 ? 70 : 50;
+    expect(finalQuantity).toBe(100 - winningQuantity);
   });
 
   it("50 + 50 against 100: both may succeed, final quantity is exactly 0", async () => {
@@ -119,7 +125,13 @@ describe("Inventory concurrency safety", () => {
       const finalCheck = await request(app)
         .get(`/api/inventory?locationId=${actor.location.id}`)
         .set("Authorization", `Bearer ${actor.token}`);
-      expect(finalCheck.body.data.items[0].quantity, `iteration ${iteration}`).toBe(30);
+      // See the comment on the single-race test above: either request can
+      // legitimately win, so the expected remaining quantity is derived
+      // from the actual winner rather than assumed to always be 30 (which
+      // silently assumes the 70 always wins — it doesn't, and asserting
+      // that produced an intermittent false failure whenever 50 won).
+      const winningQuantity = resultA.status === 200 ? 70 : 50;
+      expect(finalCheck.body.data.items[0].quantity, `iteration ${iteration}`).toBe(100 - winningQuantity);
     }
   });
 

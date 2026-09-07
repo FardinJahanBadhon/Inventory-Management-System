@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
 
-// Minimal layout shell for Phase 2. The real sidebar/header with
-// category-aware navigation is built in Phase 11 (Frontend Foundation)
-// once authentication exists and there is a session to read a location
-// category from.
+// Minimal public/unauthenticated layout — used for routes that exist
+// outside the authenticated app shell (system status, login, unauthorized,
+// not-found). The authenticated shell with header + category-aware
+// sidebar is app-layout.tsx.
 export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-screen bg-background text-foreground">

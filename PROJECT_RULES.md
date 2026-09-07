@@ -327,6 +327,234 @@ would violate one of these rules, stop and raise it instead of proceeding.
   running, and lets `Promise.all([...])` fire genuinely concurrent
   requests against the same in-process Express instance (this is how the
   concurrency tests work — see `inventory-concurrency.test.ts`).
+- **Fixed during Phase 14 (discovered while re-running the suite as a
+  regression check, unrelated to that phase's actual frontend work):**
+  `inventory-concurrency.test.ts`'s 70+50 tests asserted the final
+  quantity was always `30` (`100 - 70`), on the mistaken assumption that
+  the 70-unit request always wins the race. It doesn't — 70 and 50 each
+  individually fit within 100 (it's only their *sum*, 120, that doesn't),
+  so whichever request's `updateMany` commits first legitimately wins,
+  and the other then correctly fails as insufficient. The single-shot
+  version of this test passed most of the time by luck; the "repeats
+  the race 10 times" version made the same wrong assumption ~10x more
+  likely to be caught out, and did intermittently fail with the true,
+  equally-valid outcome (`50` remaining, i.e. the 50-unit request won).
+  Both assertions now derive the expected remaining quantity from
+  whichever request actually returned `200`, mirroring the pattern the
+  adjacent "60+60" test already used correctly. This was a test-only
+  defect — `inventory-repository.ts`'s atomic decrement itself was never
+  wrong, and needed no change. Do not reintroduce a hardcoded winner
+  assumption in a concurrent-race test; assert on the observed outcome.
+
+## Frontend Foundation Conventions (Phase 11)
+
+- **One RTK Query instance for the whole app.** `frontend/src/api/base-api.ts`
+  is the only `createApi()` call; every feature module injects its own
+  endpoints into it via `baseApi.injectEndpoints(...)`. Do not create a
+  second `createApi()` instance for a module — that would split the cache
+  and tag invalidation across two systems for no reason.
+- **No fake authentication.** At the end of Phase 11, `base-api.ts`'s
+  `prepareHeaders` and `components/common/protected-route.tsx` were
+  integration points only, with nothing wired to a real session yet — kept
+  that way deliberately rather than hard-coding `isAuthenticated = true`,
+  a placeholder JWT, or a default `LocationCategory` anywhere in the
+  frontend. Phase 12 (see below) is what actually reads a real session.
+- `getVisibleNavItems()` (`components/layout/nav-items.ts`) returns an
+  empty list for a `null` category rather than a default set of items —
+  mirrors the backend rule that a category must come from a verified
+  session, never be assumed client-side.
+- The frontend's feature directories are named `modules/` (`auth/`,
+  `users/`, `locations/`, `products/`, `inventory/`), matching the
+  backend's `modules/` naming exactly — established in Phase 2 and kept
+  in Phase 11 rather than renamed to `features/`.
+- No business-domain Redux state exists yet (no location/user/product/
+  inventory slice) — `app/store.ts` holds only the RTK Query reducer.
+  Each module's own phase introduces its own state if that module actually
+  needs client-side state beyond what RTK Query's cache already provides.
+
+## Authentication UI & Session Management Conventions (Phase 12)
+
+- **The login response's `user` is treated as equally authoritative as
+  `GET /api/auth/me`'s.** Both return the exact same `SafeUserProfile`
+  shape from the same backend code path. `login-page.tsx` populates the
+  auth slice directly from the login response rather than issuing a
+  redundant follow-up `/me` call — do not add one "just to be safe"; it
+  would return identical data.
+- **The stored access token, not the Redux `auth` slice, is the source of
+  truth `prepareHeaders` reads from** (`modules/auth/auth-storage.ts`'s
+  `getStoredAccessToken()`), not `getState()`. This was a deliberate
+  choice to avoid a circular type dependency between `api/base-api.ts` and
+  `app/store.ts`, and it means the header is correct even on the very
+  first request fired before the Redux store has processed any action.
+- **`isInitializing` never re-enters `true` after startup.** There is
+  deliberately no `setAuthInitializing()` action — `isInitializing` starts
+  `true` in `auth-slice.ts`'s initial state and is only ever set to
+  `false`, by whichever of `setAuthenticatedUser`/`clearAuthenticatedUser`
+  resolves first in `auth-initializer.tsx`. Do not add a way to flip it
+  back to `true`; nothing in this app's session model re-enters an
+  "unknown auth state" after the first resolution.
+- **A 401 from `POST /api/auth/login` never triggers the global session-
+  expiry handler.** `api/base-api.ts`'s `baseQueryWithReauth` explicitly
+  excludes the `/auth/login` URL from its "clear token + clear auth slice"
+  logic — a wrong password there is a normal, expected, inline-handled
+  outcome (rendered via `ErrorAlert`), not a stale session. Only a 401
+  from an *already-authenticated* request means the session went stale.
+- **Logout is client-side only.** There is no `POST /api/auth/logout` on
+  the backend (see Authentication Conventions (Phase 5) above — no
+  revocation system exists) and Phase 12 does not add one. `useAuth().logout()`
+  clears the local token, the auth slice, and the entire RTK Query cache
+  (`baseApi.util.resetApiState()`) — it does not and cannot invalidate the
+  JWT itself, which remains valid server-side until `JWT_EXPIRES_IN`.
+- **`require-auth.tsx` itself stayed authentication-only, not
+  category-based** — at the end of Phase 12, every route behind it was
+  reachable by any authenticated user regardless of `locationCategory`.
+  Category-based restriction was added in Phase 13 as a separate,
+  composable guard (`require-administration-access.tsx`) layered *inside*
+  `require-auth.tsx`, not by teaching `require-auth.tsx` itself about
+  categories — keep that separation for any future category-specific
+  guard (e.g. an eventual operational-only one in Phase 14) rather than
+  growing one guard component that knows about every category.
+- No `zod`/`react-hook-form` on the frontend — `modules/auth/
+  auth-validation.ts` is a plain function (`validateLoginForm`), not a
+  schema. `zod` is present in `node_modules` only as an undeclared
+  transitive dependency of something else; it is not a project dependency
+  and must not be imported directly until it's actually added to
+  `frontend/package.json`.
+
+## Admin UI Conventions (Phase 13)
+
+- **Two new frontend dependencies, deliberately added:**
+  `@radix-ui/react-dialog` and `@radix-ui/react-select`, both declared in
+  `frontend/package.json` (not left as undeclared transitive deps, unlike
+  `zod` — see Phase 12's note above). These are the accessible-dialog and
+  accessible-select primitives Shadcn itself is built on; every management
+  page needs at least one of each (create/edit forms, category/location
+  pickers), and building either from scratch would either fail the
+  accessibility requirements (focus trap, keyboard nav, ARIA) or duplicate
+  what these libraries already solve correctly. No other new dependency
+  was added — no table library, no form library, no dropdown-menu
+  primitive not already justified above.
+- **Category-based route restriction is `require-administration-access.tsx`,
+  layered inside `require-auth.tsx`** (see the updated Phase 12 note
+  above) — not a change to `require-auth.tsx` itself. `/profile` is
+  intentionally outside this guard (inside `RequireAuth` only) because it
+  isn't part of the Administration UI and stays reachable by every
+  category — confirmed in Phase 14, which added the operational
+  counterpart guard alongside this one rather than folding both into one.
+- **Form dialogs reset via a `key` prop, not a `useEffect`.** Every
+  `*-form-dialog.tsx` (Location/User/Product) computes its initial
+  `useState` values directly from its `entity` prop and is deliberately
+  given no reset effect; the calling page increments a `formKey` counter
+  on every "New …"/"Edit" click and passes it as the dialog's `key`,
+  forcing a fresh mount instead. This was a deliberate fix for the
+  `react-hooks/set-state-in-effect` lint rule (calling `setState`
+  synchronously inside an effect body) — do not reintroduce an
+  open-triggered reset effect to "simplify" this back; keep the
+  remount-via-key pattern for any future form dialog.
+- **`InitializeInventoryDialog` never closes itself or clears its
+  location/product selection after a successful submit** — only the
+  quantity field. Initialization always creates a new row (Business Rule
+  #6), so repeating the same destination for another product, or the same
+  product again, is the expected next action, not an edge case to guard
+  against. Do not add logic that prevents, warns about, or dedupes a
+  repeated product+location initialization anywhere in this dialog or in
+  `inventory-api.ts`.
+- **The Administration Office's category/active controls are disabled in
+  `location-form-dialog.tsx`'s edit mode** (detected via
+  `location.category === "ADMINISTRATION"` on the row being edited, not a
+  name check — consistent with the backend's own check, see Location
+  Management Conventions (Phase 6) above) — a pure rename stays enabled.
+  This is a UI courtesy that mirrors the backend's rejection; removing it
+  would not create a security hole (the backend still rejects the change),
+  but would let an admin submit a form the server is guaranteed to bounce.
+- **Dashboard counts come from existing list endpoints' pagination
+  metadata** (`meta.total`, fetched with `pageSize: 1`), never from a
+  dedicated stats/analytics endpoint — none exists, and adding one was
+  explicitly out of scope. Do not invent a backend aggregation endpoint
+  for the dashboard; if a real metric can't be derived from an existing
+  endpoint's response, it doesn't belong on the dashboard yet.
+- **`GET /api/inventory` has no `search` parameter** — unlike
+  Locations/Users/Products, `admin-inventory-page.tsx` only offers
+  location/product filter selects, never a text search box. Do not add
+  one to the frontend; there is nothing on the backend for it to call.
+- Each of `locations/`, `users/`, `products/`, `inventory/` under
+  `frontend/src/modules/` defines its own `PaginatedData<T>`-shaped query
+  hook via `baseApi.injectEndpoints(...)` and its own `*-types.ts` mirroring
+  its backend module's response shape exactly (no `isActive` on
+  `AuthenticatedUserProfile`-style guessing; e.g. `Product` has no
+  `locationId`, `InventoryRecord` is never aggregated). `types/pagination.ts`
+  is the one shared type across all four (`PaginatedData<T>`) — do not
+  duplicate that shape per module.
+
+## Operational UI Conventions (Phase 14)
+
+- **`admin-inventory-page.tsx` was renamed from `inventory-page.tsx`**
+  when this phase added `operational-inventory-page.tsx` as its sibling —
+  a small, deliberate rename for clarity, not a functional change (see
+  Phase 13's note above, which referenced the old name; it's now
+  corrected throughout this file and the README).
+- **One component per screen for all four operational categories** —
+  `operational-inventory-page.tsx` and `operational-dashboard-page.tsx`
+  contain no `if (category === "STORE")`-style branch anywhere. Both read
+  `useAuth()` only for display (name, location, category) and never pass
+  a `locationId` to any query — `GET /api/inventory` already scopes an
+  operational caller to their own location (Inventory Management
+  Conventions (Phase 9) above). Do not add a per-category variant of
+  either page; if a genuine behavioral difference between STORE/LAB/WARD/
+  PHARMACY is ever required, it belongs inside these shared components as
+  a `locationCategory`-keyed branch, not as a new file.
+- **`GET /api/products` is Administration-only — operational pages must
+  never call it.** `operational-inventory-page.tsx`'s product-filter
+  dropdown deliberately does NOT use `useGetProductsQuery`
+  (`modules/products/product-api.ts`); it derives its options from a
+  second `useGetInventoryQuery({ pageSize: 100 })` call and reads each
+  record's embedded `product` field instead. This was a real bug caught
+  by this phase's own end-to-end testing (the dropdown silently rendered
+  empty — a 403 the UI never surfaced as an error, since the query result
+  was just treated as "no data yet"). Do not reintroduce a
+  `useGetProductsQuery`/`useGetLocationsQuery` call anywhere reachable by
+  an operational session — both endpoints are Administration-only for
+  every method, including `GET`.
+- **Distribution and Trash never send a `locationId`.** Neither
+  `distribute-inventory-dialog.tsx` nor `trash-inventory-dialog.tsx` has a
+  location field — the target row comes from `record.id` (already scoped
+  to the caller by the time it was fetched), and the source location is
+  whatever the backend derives from the caller's own JWT
+  (`requireOperationalLocationAccess` + the ownership check in
+  `inventory-service.ts`, Inventory Management Conventions (Phase 9)
+  above). Do not add a location picker to either dialog "for
+  flexibility" — there is no valid use for one, and doing so would imply
+  a capability (cross-location distribution) the business rules
+  explicitly forbid.
+- **Trash is the only two-step operational action, reusing
+  `ConfirmActionDialog`** (the same component Locations/Users/Products
+  use for activate/deactivate) as its second step. Distribute stays
+  single-step. Do not add a confirmation step to Distribute "for
+  consistency" — it's the routine, frequent action, and the asymmetry
+  with Trash is deliberate (see Phase 14's own instructions on this).
+- **`/operations/dashboard` and `/operations/inventory` are separate
+  routes from `/dashboard` and `/inventory`**, not the same URLs
+  branching by category — see the Admin UI Conventions (Phase 13) note
+  above on `require-administration-access.tsx` for the parallel
+  `require-operational-access.tsx` guard. Do not collapse these into one
+  route with an internal role switch; the two Inventory pages in
+  particular differ enough in capability (cross-location + Initialize vs.
+  own-location-only + Distribute/Trash) that a shared URL would need the
+  branch anyway, with none of the benefit.
+- **Post-login and already-authenticated-visiting-`/login` redirects are
+  category-aware** (`login-page.tsx` and
+  `redirect-if-authenticated.tsx` both branch on
+  `location.category === "ADMINISTRATION"` to choose `/dashboard` vs.
+  `/operations/dashboard`) — a defect from Phase 12/13 (both hardcoded
+  `/dashboard`) that this phase's own regression pass caught and fixed,
+  since it would have silently bounced every operational login straight
+  to `/unauthorized`. Any future additional "landing page" branch (e.g. a
+  fifth category) must be added to both places, not just one.
+- **A pre-existing, unrelated test defect was fixed while re-running the
+  full suite as this phase's regression check** — see Testing Conventions
+  (Phase 10) above for `inventory-concurrency.test.ts`'s corrected
+  race-winner assertions. Not a Phase 14 change in substance, but noted
+  here since it's how it was found.
 
 ## Engineering Conventions
 

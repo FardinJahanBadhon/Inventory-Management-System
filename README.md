@@ -5,13 +5,15 @@ controls master data (locations, users, products) and initializes stock;
 operational locations (Store, Lab, Ward, Pharmacy) can only view their own
 inventory and reduce it through Distribution or Trash.
 
-> **Current phase: Phase 10 — API Testing & Security Verification.**
-> A 135-test integration suite (Vitest + Supertest, against a dedicated
-> test database — see §18 below) now exercises every endpoint,
-> authorization rule, and business invariant across all five backend
-> modules, including a dedicated concurrency suite that fires genuinely
-> simultaneous requests at the inventory decrement. All backend modules
-> described in the source requirements now exist and are verified. See
+> **Current phase: Phase 14 — Operational UI.**
+> The backend (Phases 4-10), frontend foundation (Phase 11, §18),
+> authentication/session layer (Phase 12, §19), and Admin UI (Phase 13,
+> §20) are all fully implemented and verified. Phase 14 adds the
+> Operational interface — one Dashboard and one Inventory page (view,
+> Distribute, Trash) shared by STORE, LAB, WARD, and PHARMACY alike — at
+> its own `/operations/*` routes, gated to those four categories. See §21
+> below. Every frontend phase (0-14) is now complete; only Phase 15 (full
+> integration) and Phase 16 (final quality check) remain. See
 > [PROJECT_RULES.md](PROJECT_RULES.md) for the non-negotiable business and
 > engineering rules driving this build.
 
@@ -78,6 +80,57 @@ backend/src/
 Every module listed above is now fully implemented — Phases 5 through 9
 filled these in one at a time, each following the same layered
 route → middleware → controller → service → repository → Prisma pattern.
+
+### Frontend structure
+
+```
+frontend/src/
+├── main.tsx                    StrictMode → AppProviders → App
+├── App.tsx                     RouterProvider
+├── app/
+│   ├── store.ts                 Redux store (RTK Query reducer + auth slice)
+│   ├── router.tsx                route table — see §20 (Admin) / §21 (Operational)
+│   └── providers/
+│       └── app-providers.tsx    composes Redux Provider (+ future providers)
+├── api/
+│   ├── base-api.ts               the one RTK Query instance every module
+│   │                              injects endpoints into; attaches the JWT
+│   │                              and handles session-expiring 401s
+│   └── health-api.ts             /health check (Phase 2 verification page)
+├── components/
+│   ├── ui/                       Shadcn primitives: button, card, alert,
+│   │                              skeleton, input, label, table, dialog,
+│   │                              select, badge
+│   ├── common/                   loading-spinner, page-loader, empty-state,
+│   │                              error-alert, protected-route,
+│   │                              management-page-header, status-badge,
+│   │                              search-input, confirm-action-dialog,
+│   │                              pagination-controls, summary-card
+│   └── layout/                   app-shell (public layout), app-layout +
+│                                  header + sidebar (authenticated layout,
+│                                  session-aware since Phase 12), nav-items
+│                                  (category-aware nav map, admin + operational)
+├── hooks/redux-hooks.ts          useAppDispatch / useAppSelector
+├── lib/
+│   ├── utils.ts                   cn() — Shadcn's class-merge helper
+│   └── api-error.ts               toApiError / getApiErrorMessage
+├── modules/                      one directory per feature, matching the
+│   ├── auth/                     backend's modules/ naming — includes
+│   ├── locations/                require-administration-access.tsx and
+│   ├── users/                    require-operational-access.tsx (route
+│   ├── products/                 guards). dashboard/ and inventory/ each
+│   ├── inventory/                hold both an admin-*/Admin* page and an
+│   └── dashboard/                operational-*/Operational* page/dialogs
+│                                  sharing one *-api.ts and *-types.ts.
+├── pages/                        placeholder-page, not-found-page,
+│                                  unauthorized-page, system-status-page
+├── routes/paths.ts               ROUTES path constants
+├── types/
+│   ├── location-category.ts     LocationCategory (mirrors the backend enum)
+│   └── pagination.ts             PaginatedData<T> (mirrors the backend's
+│                                  { items, meta } list envelope)
+└── vite-env.d.ts                VITE_API_BASE_URL typing
+```
 
 ## 3. Prerequisites
 
@@ -616,7 +669,379 @@ fix). If you ever see this guard throw, **do not bypass it** — it means
 `DATABASE_URL` resolved to something other than the test database, and
 running anyway would delete real data.
 
-## 18. Project Phases
+## 18. Frontend Foundation
+
+Phase 11 builds the scaffolding every later frontend phase (Auth UI, Admin
+UI, Operational UI, Integration) plugs into. No business screens exist yet
+— every route below renders a placeholder page purely to prove the
+plumbing works end to end.
+
+### Redux Toolkit + RTK Query
+
+`app/store.ts` wires up one Redux store containing only the RTK Query
+reducer/middleware so far — no business-domain slices exist yet (locations,
+users, products, and inventory state are introduced alongside their own
+modules). Typed `useAppDispatch`/`useAppSelector` hooks live in
+`hooks/redux-hooks.ts`. `api/base-api.ts` is the single `createApi()`
+instance for the whole app; every future feature module injects endpoints
+into it (`baseApi.injectEndpoints(...)`) rather than creating a separate
+API instance, so all server state shares one cache. Its `prepareHeaders`
+was the integration point left for session token injection — Phase 12
+(§19 below) fills it in.
+
+### Router and layout foundation
+
+`app/router.tsx` defines every route the application will need, each
+rendering a `PlaceholderPage` for now:
+
+```
+/               system status (Phase 2 verification page)
+/login          placeholder — Phase 12
+/unauthorized   real page — shown when Phase 12 rejects a route
+/dashboard      } placeholder — these six share the authenticated
+/locations      } app-layout.tsx shell (header + sidebar)
+/users          }
+/products       }
+/inventory      }
+/profile        }
+*               real Not Found page
+```
+
+`components/common/protected-route.tsx` defines the generic
+route-guard mechanism (`<ProtectedRoute isAllowed={...} />` as a layout
+route) without wiring it to a real value — Phase 11 deliberately avoided
+faking `isAllowed={true}` before a session existed to compute it from (see
+PROJECT_RULES.md's stance on frontend authorization being usability-only,
+never the security boundary). Phase 12 (§19 below) supplies that real
+value.
+
+### Category-aware navigation
+
+`components/layout/nav-items.ts` defines the nav map and
+`getVisibleNavItems(category, items)`, which filters it down to what a
+given `LocationCategory` (`types/location-category.ts`, mirroring the
+backend's five-value enum exactly) should see. `app-layout.tsx`'s sidebar
+rendered the full, unfiltered list at the end of Phase 11 because no
+authenticated category existed yet to filter by; Phase 12 (§19 below)
+supplies the real session category.
+
+### Reusable states
+
+`lib/api-error.ts`'s `toApiError`/`getApiErrorMessage` normalize anything
+RTK Query can return from a failed query (HTTP error responses using the
+backend's `{ success, message, error }` envelope, `FETCH_ERROR`,
+`TIMEOUT_ERROR`, or a thrown `SerializedError`) into one `ApiError` shape,
+so components never parse the raw union themselves.
+`components/common/error-alert.tsx` renders that message.
+`components/common/loading-spinner.tsx` / `page-loader.tsx` and
+`components/ui/skeleton.tsx` cover loading states;
+`components/common/empty-state.tsx` covers empty lists. All are generic —
+no module-specific copy is hard-coded into any of them.
+
+### Frontend scripts
+
+```bash
+cd frontend
+npm run dev         # Vite dev server (http://localhost:5173)
+npm run build        # tsc -b && vite build (production bundle in dist/)
+npm run typecheck    # tsc -b only
+npm run lint         # eslint .
+```
+
+## 19. Authentication UI & Session Management
+
+Phase 12 fills in the integration points Phase 11 left open. All
+auth-specific code lives in `frontend/src/modules/auth/` (matching the
+backend's `modules/` naming — see PROJECT_RULES.md).
+
+### Login
+
+`/login` (`modules/auth/login-page.tsx`) posts `{ username, password }` to
+`POST /api/auth/login` — never a `locationId`, `category`, or any
+authorization field; the server alone determines identity and location.
+Empty-field validation is inline and client-side only (usability, not a
+business rule). A failed login (wrong credentials, unknown username, or a
+deactivated account — all indistinguishable by design, see §12) surfaces
+the backend's own message via `getApiErrorMessage()` rather than a
+frontend-invented one. On success, the response's `accessToken` is stored
+(`modules/auth/auth-storage.ts`, the only code that touches
+`localStorage` for it) and its `user` — the same safe
+`{ id, username, name, location: { id, name, category } }` shape
+`GET /api/auth/me` returns — populates the Redux `auth` slice
+(`modules/auth/auth-slice.ts`) directly, without a redundant follow-up
+`/me` call.
+
+### Session restoration
+
+`modules/auth/auth-initializer.tsx` runs once at startup, wrapping
+`<RouterProvider>` in `App.tsx`. If a token is stored, it calls
+`GET /api/auth/me` — the authoritative source, never a client-side JWT
+decode — and restores the session on success or discards the token on
+any failure (expired/invalid token, or a network/server error alike, so
+the app never gets stuck initializing). `isInitializing` in the auth slice
+starts `true` and is not set to `false` until this resolves; every route
+guard checks it before rendering or redirecting, so there is no
+login-page flash on a page a valid session should already pass through.
+
+### Route protection
+
+- `modules/auth/require-auth.tsx` — wraps the six authenticated routes
+  (`/dashboard`, `/locations`, `/users`, `/products`, `/inventory`,
+  `/profile`). Shows a `PageLoader` while `isInitializing`, otherwise
+  delegates to Phase 11's `<ProtectedRoute isAllowed={isAuthenticated} />`.
+- `modules/auth/redirect-if-authenticated.tsx` — wraps `/login`. An
+  already-authenticated visitor is sent to `/dashboard` instead of seeing
+  the form again; an unauthenticated one sees it normally. No redirect
+  loop: each guard only redirects in one direction.
+- Category-based route restriction (e.g. blocking a non-Administration
+  user from `/locations`) is **not** implemented — Phase 12 only
+  distinguishes authenticated from unauthenticated. `app-layout.tsx`'s
+  sidebar does filter by category (`getVisibleNavItems`), but that is a
+  navigation convenience, not enforcement; the backend remains the only
+  authorization boundary either way.
+
+### Token attachment and session expiry
+
+`api/base-api.ts`'s `prepareHeaders` reads the stored token and sets
+`Authorization: Bearer <token>` on every request — centralized once, not
+duplicated per endpoint. A wrapping `baseQueryWithReauth` inspects every
+response: a `401` from any endpoint **other than** `/auth/login` (a wrong
+password there is an expected, inline-handled outcome, not a session
+expiry) clears the stored token and the auth slice in one place. The
+route guards above react to the resulting `isAuthenticated: false`
+automatically — this layer changes state, it never navigates directly.
+
+### Logout
+
+The header's "Log out" button (session-aware since this phase) calls
+`useAuth().logout()` (`modules/auth/use-auth.ts`), which clears the stored
+token, clears the auth slice, and resets the entire RTK Query cache
+(`baseApi.util.resetApiState()`) so no authenticated data can leak into
+the next session opened in the same browser. There is no server-side
+logout endpoint — a JWT issued before logout remains cryptographically
+valid until its natural `JWT_EXPIRES_IN` expiry (see §12); logout is a
+client-side session teardown only, consistent with the backend's existing
+no-revocation design.
+
+### `useAuth()`
+
+`modules/auth/use-auth.ts` is the one place components read session state
+from: `{ user, isAuthenticated, isInitializing, locationId,
+locationCategory, logout }`, backed by the Redux `auth` slice — no
+component reads `localStorage` or decodes a JWT directly.
+
+## 20. Admin UI
+
+Phase 13 implements the full Administration-facing interface on the
+foundation Phases 11-12 built. All of it lives in
+`frontend/src/modules/{dashboard,locations,users,products,inventory}/`.
+
+### Route protection
+
+Every Admin route is nested inside both guards:
+`RequireAuth` (Phase 12 — redirects an unauthenticated visitor to
+`/login`) and, one level deeper, `modules/auth/require-administration-access.tsx`
+(new this phase — redirects an authenticated
+non-`ADMINISTRATION` user to `/unauthorized`). `/profile` sits inside only
+`RequireAuth`, since it isn't part of the Administration UI and will
+eventually be reachable by every category. This is a usability layer
+only: every underlying API call is independently re-checked by the
+backend's own `requireAdministrationAccess` middleware (§12-16 above)
+regardless of what the frontend shows or hides — verified directly (see
+Manual verification below) by calling `/api/locations` with a STORE
+user's token and getting `403` even though the UI never exposes a path to
+that call.
+
+```
+/dashboard    Admin Dashboard (summary counts)
+/locations    Location Management
+/users        User Management
+/products     Product Management
+/inventory    Inventory viewing + Initialization
+```
+
+The sidebar (`components/layout/nav-items.ts`) only lists these five for
+`ADMINISTRATION`. Phase 14 gave the four operational categories their own
+Dashboard/Inventory at separate `/operations/*` routes (§21 below) rather
+than reopening these same five — the Admin and Operational Inventory
+pages differ enough in capability (cross-location view + Initialize vs.
+own-location-only + Distribute/Trash) that one URL branching on category
+would have been more confusing than two symmetric, guarded route groups.
+
+### Admin Dashboard
+
+`modules/dashboard/admin-dashboard-page.tsx` shows the current user's
+name/location/category (from `useAuth()`) and four counts — Locations,
+Users, Products, Inventory records — each read from that resource's own
+list endpoint called with `pageSize: 1` and its `meta.total`, rather than
+a dedicated stats endpoint (the backend has none, and inventing one was
+out of scope). "Inventory records" is a row count, not a summed quantity —
+consistent with Product + Location not being unique.
+
+### Location / User / Product Management
+
+All three follow one consistent pattern: `ManagementPageHeader` (title +
+"New …" button) → search/filter controls → a `Table` with
+loading/empty/error states → `PaginationControls`. Create and edit share
+one dialog per resource (`*-form-dialog.tsx`), remounted via a `key` on
+every open so its fields always start from that row's current values (or
+blank, for create) without a state-reset `useEffect`.
+
+- **Locations** — search by name, filter by category/status. The
+  Administration Office row shows no Deactivate button, and its edit
+  dialog disables the category select and the active checkbox (with an
+  explanatory note) — a pure rename is still allowed. This mirrors, not
+  replaces, the backend's own rejection of those changes (§13 above).
+- **Users** — search by name/username, filter by location/status.
+  Location is a picker (populated from the Locations API), never free
+  text — the backend alone derives the created/updated user's category
+  from it; there is no role or category field anywhere in this form.
+  Password is optional on edit (blank leaves it unchanged) and is never
+  rendered anywhere in the UI. Deactivating the last active Administration
+  user still correctly surfaces the backend's `409` (§14 above) rather
+  than silently succeeding or being blocked client-side.
+- **Products** — search by code/name, filter by status. `isActive` only
+  appears in the edit dialog, matching `POST /api/products` not accepting
+  it at all (§15 above). A duplicate `code` surfaces the backend's `409`
+  inline without closing the dialog.
+
+### Inventory
+
+`modules/inventory/admin-inventory-page.tsx` (named that once Phase 14
+added its `operational-inventory-page.tsx` sibling — see §21) lists
+individual `InventoryRecord` rows — filterable by location/product only
+(the only filters `GET /api/inventory` supports; there is no search
+param) — and never aggregates same-product-same-location rows into one.
+"Initialize inventory" opens `initialize-inventory-dialog.tsx`
+(destination location + product pickers, quantity), which deliberately
+does **not** close itself or clear the location/product choice after a
+successful submission — only the quantity — since initializing the same
+pair again is expected, valid, and produces a second, separate row
+(verified directly: two consecutive initializations of the same
+product+location produced two rows summing correctly, never a merge).
+Distribution and Trash are not offered anywhere in this UI — those remain
+exclusively operational actions (§21 below).
+
+### Manual verification
+
+All of the following were driven end-to-end in a real (headless Chromium)
+browser against the running dev servers: Admin login → dashboard counts;
+create/search/edit a Location; the Administration Office's locked
+category/active controls; create/edit a User and confirm password never
+renders; create a Product and get a clean inline error on a duplicate
+code; initialize the same product+location twice and confirm two
+separate rows; log in as the newly-created STORE user and get redirected
+to `/unauthorized` from both `/dashboard` and `/locations`; confirm the
+backend independently returns `403` for that same user calling
+`/api/locations` directly; and, with a corrupted token, confirm an Admin
+page redirects to `/login` and clears the stored token (Phase 12's
+session-expiry handling, unmodified by this phase).
+
+## 21. Operational UI
+
+Phase 14 implements the interface for STORE, LAB, WARD, and PHARMACY
+users — one shared implementation, not four category-specific ones. It
+lives alongside the Admin UI's code in the same
+`modules/{dashboard,inventory}/` directories.
+
+### Route protection
+
+Mirrors the Admin UI's guard pattern exactly, at its own routes:
+`RequireAuth` → `modules/auth/require-operational-access.tsx` (new this
+phase — allows exactly `STORE`/`LAB`/`WARD`/`PHARMACY`, redirects
+`ADMINISTRATION` and anyone else to `/unauthorized`) → `AppLayout`.
+
+```
+/operations/dashboard    Operational Dashboard (own location + record count)
+/operations/inventory    Own-location inventory, Distribute, Trash
+```
+
+These are deliberately separate URLs from the Admin `/dashboard` and
+`/inventory` (§20 above) rather than the same routes branching on
+category — the two pages differ enough in capability that a shared URL
+would need an internal role-switch anyway, and a distinct route per
+audience keeps both guards simple, symmetric, and independently testable.
+`getVisibleNavItems()` (`components/layout/nav-items.ts`) shows exactly
+two links — Dashboard, Inventory — to the four operational categories,
+and the original five Admin links to none of them. As with the Admin UI,
+this is a usability layer only: every Distribute/Trash/view call is
+independently re-checked by the backend's own
+`requireOperationalLocationAccess` middleware and the ownership check
+inside `inventory-service.ts` (§16 above) regardless of what the frontend
+shows — verified directly (see Manual verification below).
+
+### One component for four categories
+
+`operational-inventory-page.tsx` and `operational-dashboard-page.tsx`
+take no category-specific branch anywhere — both simply read
+`useAuth().locationCategory`/`.user.location` for display and never pass
+a `locationId` to any query. `GET /api/inventory` already forces the
+scope to the caller's own location for every non-`ADMINISTRATION`
+category (§16 above), so "my location's inventory" is just "inventory,"
+unfiltered by location, from an operational token. There is no
+`StoreInventoryPage`/`LabInventoryPage`/etc., and none was needed.
+
+### A defect this phase's own testing caught
+
+`GET /api/products` is Administration-only (§15 above) — the operational
+Inventory page's product-filter dropdown cannot populate itself from that
+endpoint the way the Admin Inventory page does; an operational caller
+gets a `403`. The fix: `operational-inventory-page.tsx` derives its
+filter options from a second, larger `GET /api/inventory` call instead
+(an endpoint operational users can call) and reads the distinct
+`product` values already embedded in those records — no new backend
+endpoint, no Products call from an operational context. This was caught
+by the phase's own end-to-end verification (an empty dropdown with only
+"All products"), not by inspection beforehand.
+
+### Distribution
+
+`distribute-inventory-dialog.tsx` takes an `InventoryRecord` (never a
+location) and posts `{ quantity }` to
+`POST /api/inventory/:id/distribute` — there is no source-location field
+anywhere in the form or the request; the backend derives the source from
+the caller's token. A single-step dialog (quantity entry, submit) — no
+confirmation step, since this is the routine, frequent operational
+action.
+
+### Trash
+
+`trash-inventory-dialog.tsx` is two steps, deliberately reusing the
+Admin UI's `ConfirmActionDialog` for the second one (the same component
+that backs Location/User/Product activate/deactivate): enter a quantity,
+then explicitly confirm a dynamic description naming the exact product,
+quantity, and location before `POST /api/inventory/:id/trash` fires.
+Trash never deletes the `Inventory` row — only its `quantity` field
+changes, same as Distribute (§16 above); the row remains part of
+operational history even at `0`.
+
+### Manual verification
+
+Driven end-to-end in a real (headless Chromium) browser, for **all four**
+operational categories, against freshly-created test locations/users/
+inventory: login → correct redirect to `/operations/dashboard` → header
+shows the right name/location/category → sidebar shows exactly Dashboard
++ Inventory, no Admin items → Inventory list shows only that location's
+records → Distribute reduces a record's quantity → Trash (through its
+confirmation step) reduces it further → direct navigation to `/locations`
+redirects to `/unauthorized`. Separately verified with direct `fetch`
+calls (bypassing the UI entirely, using a STORE session's real token):
+distributing/trashing another location's (LAB's, WARD's)
+`Inventory` id both return `403`; sending a `locationId` in a
+distribute request body is silently ignored, not honored, confirmed by
+checking the response's own `location.id`; and
+`POST /api/inventory/initialize`, `/api/locations`, `/api/users`,
+`/api/products` all return `403` for an operational token. From the
+Administration side: the Admin Inventory page has no Distribute/Trash
+controls, and an admin session visiting `/operations/dashboard` or
+`/operations/inventory` — or calling `/distribute` directly — is rejected
+exactly like an operational session is rejected from the Admin routes.
+An invalid/expired token on an operational route triggers the same
+Phase 12 session-expiry handling (clear token, clear session, redirect to
+`/login`) already verified for the Admin UI — nothing operational-specific
+was added to that mechanism.
+
+## 22. Project Phases
 
 This project is being built incrementally. Completed so far:
 
@@ -630,9 +1055,10 @@ This project is being built incrementally. Completed so far:
 - [x] Phase 7 — User Management
 - [x] Phase 8 — Product Management
 - [x] Phase 9 — Inventory Management
-- [x] Phase 10 — API Testing & Security Verification (this phase)
-- [ ] Phase 11 — Frontend Foundation
-- [ ] Phase 12 — Admin UI
-- [ ] Phase 13 — Operational User UI
-- [ ] Phase 14 — Integration
-- [ ] Phase 15 — Final Quality Check
+- [x] Phase 10 — API Testing & Security Verification
+- [x] Phase 11 — Frontend Foundation
+- [x] Phase 12 — Authentication UI & Session Management
+- [x] Phase 13 — Admin UI
+- [x] Phase 14 — Operational User UI (this phase)
+- [ ] Phase 15 — Integration
+- [ ] Phase 16 — Final Quality Check

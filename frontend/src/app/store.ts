@@ -1,11 +1,10 @@
 import { configureStore } from "@reduxjs/toolkit";
 import { baseApi } from "@/api/base-api";
+import { authReducer } from "@/modules/auth/auth-slice";
 
-// The auth slice (session/user/location state) is added in Phase 5 once
-// login exists. For now the store only wires up RTK Query's reducer and
-// middleware, which is all any module needs to start injecting endpoints.
 export const store = configureStore({
   reducer: {
+    auth: authReducer,
     [baseApi.reducerPath]: baseApi.reducer,
   },
   middleware: (getDefaultMiddleware) =>
