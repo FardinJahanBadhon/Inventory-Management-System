@@ -5,12 +5,15 @@ controls master data (locations, users, products) and initializes stock;
 operational locations (Store, Lab, Ward, Pharmacy) can only view their own
 inventory and reduce it through Distribution or Trash.
 
-> **Current phase: Phase 6 — Location Management.**
-> Full Administration-only CRUD for locations now exists (`/api/locations`),
-> including search/filter/pagination and Administration Office protection.
-> Users, products, and inventory still have no business endpoints; those
-> are implemented starting Phase 7. See [PROJECT_RULES.md](PROJECT_RULES.md)
-> for the non-negotiable business and engineering rules driving this build.
+> **Current phase: Phase 10 — API Testing & Security Verification.**
+> A 135-test integration suite (Vitest + Supertest, against a dedicated
+> test database — see §18 below) now exercises every endpoint,
+> authorization rule, and business invariant across all five backend
+> modules, including a dedicated concurrency suite that fires genuinely
+> simultaneous requests at the inventory decrement. All backend modules
+> described in the source requirements now exist and are verified. See
+> [PROJECT_RULES.md](PROJECT_RULES.md) for the non-negotiable business and
+> engineering rules driving this build.
 
 ## 1. Technology Stack
 
@@ -37,13 +40,15 @@ inventory-management-system/
 Backend and frontend each have their own `.env.example` documenting the
 variables specific to that app.
 
-### Backend structure (as of Phase 4)
+### Backend structure
 
 ```
 backend/src/
 ├── app.ts                       Express app assembly (no server startup)
 ├── server.ts                    startup (DB connect) + graceful shutdown
-├── config/index.ts              Zod-validated environment configuration
+├── config/
+│   ├── index.ts                 Zod-validated environment configuration
+│   └── constants.ts             DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 ├── lib/
 │   ├── prisma.ts                the one PrismaClient instance
 │   ├── jwt.ts                   signAccessToken / verifyAccessToken
@@ -60,14 +65,19 @@ backend/src/
 │   ├── errors/                  AppError subclasses + ERROR_CODES
 │   ├── types/                   AuthenticatedUser, API envelope types,
 │   │                            Express Request augmentation
-│   └── utils/                   logger, asyncHandler, sendSuccess
-└── modules/
-    ├── auth/auth-routes.ts          } each currently an empty Router —
-    ├── users/user-routes.ts         } real endpoints are added as each
-    ├── locations/location-routes.ts } module's phase is implemented
-    ├── products/product-routes.ts   } (Phase 5 through 9)
-    └── inventory/inventory-routes.ts}
+│   └── utils/                   logger, asyncHandler, sendSuccess,
+│                                 pagination (shared by every list endpoint)
+└── modules/                     each: *-routes/*-controller/*-service/
+    ├── auth/                    *-repository/*-schema/*-types.ts
+    ├── users/
+    ├── locations/
+    ├── products/
+    └── inventory/
 ```
+
+Every module listed above is now fully implemented — Phases 5 through 9
+filled these in one at a time, each following the same layered
+route → middleware → controller → service → repository → Prisma pattern.
 
 ## 3. Prerequisites
 
@@ -341,7 +351,272 @@ protected. Attempting to create a second `ADMINISTRATION`-category
 location (or promote an existing one to it) is likewise rejected with
 `409`.
 
-## 14. Project Phases
+## 14. User Management
+
+All endpoints require `Authorization: Bearer <JWT>` **and** an
+Administration-category account — same 401/403 behavior as Location
+Management.
+
+```
+POST   /api/users        create a user
+GET    /api/users        list users (search, filter by location/active, paginate)
+GET    /api/users/:id    get one user
+PATCH  /api/users/:id    update name / username / password / locationId / isActive
+```
+
+No `DELETE` — users are deactivated, never hard-deleted.
+
+### Create
+
+```bash
+curl -X POST http://localhost:4000/api/users \
+  -H "Authorization: Bearer <ADMIN_JWT>" -H "Content-Type: application/json" \
+  -d '{"name":"Store Operator","username":"store.operator","password":"StrongPassword123","locationId":"<LOCATION_ID>"}'
+```
+
+`locationId` must reference an existing location (`404` if not).
+`username` must be unique (`409` if taken) and matches
+`[a-zA-Z0-9._-]{3,50}`. `password` requires 8+ characters and is bcrypt-hashed
+before storage — the response never includes `password` or `passwordHash`,
+under any field name, on any endpoint in this module.
+
+Sending extra fields like `"category": "ADMINISTRATION"` or `"role": "ADMIN"`
+has no effect — they aren't part of the schema and are silently dropped; a
+user's effective permissions always come from their assigned location's
+category, never from anything in the request body.
+
+### List, search, and filter
+
+```bash
+curl "http://localhost:4000/api/users?search=store&locationId=<LOCATION_ID>&isActive=true" \
+  -H "Authorization: Bearer <ADMIN_JWT>"
+```
+
+`search` matches `name` or `username` (case-insensitive). Same
+`{ items, meta }` pagination shape as Locations.
+
+### Updating a user
+
+`PATCH /api/users/:id` accepts any subset of `name`, `username`, `password`,
+`locationId`, `isActive`. Omitting `password` leaves the existing one
+unchanged. Changing `locationId` re-validates the destination location and
+takes effect on the user's *next* login (an already-issued JWT keeps its
+original `locationCategory` claim until it expires — see Authentication
+above).
+
+### The "at least one active administrator" invariant
+
+If a user is currently the only active user assigned to the
+`ADMINISTRATION`-category location, deactivating them or reassigning them
+to a different location is rejected with `409` — the system must always
+have at least one usable administrator. This check is bypassed once a
+second active Administration user exists.
+
+## 15. Product Management
+
+All endpoints require `Authorization: Bearer <JWT>` **and** an
+Administration-category account — same 401/403 behavior as Locations and
+Users. Products are global master data with no location ownership at all.
+
+```
+POST   /api/products        create a product
+GET    /api/products        list products (search, isActive filter, paginate)
+GET    /api/products/:id    get one product
+PATCH  /api/products/:id    update code / name / unit / isActive
+```
+
+No `DELETE` — products are deactivated, never hard-deleted (a deactivated
+product's historical `Inventory` references must remain valid).
+
+### Create
+
+```bash
+curl -X POST http://localhost:4000/api/products \
+  -H "Authorization: Bearer <ADMIN_JWT>" -H "Content-Type: application/json" \
+  -d '{"code":"SKU-001","name":"Paracetamol 500mg","unit":"box"}'
+```
+
+`code` must be unique (`409` if taken). Unlike Location/User creation,
+`isActive` is **not** an accepted field here — every new product starts
+active; use `PATCH` afterward if it needs to be deactivated immediately.
+Any client-sent `id`, `isActive`, `createdAt`, or `updatedAt` is ignored —
+the server controls all four.
+
+### List, search, and filter
+
+```bash
+curl "http://localhost:4000/api/products?search=paracetamol&isActive=true" \
+  -H "Authorization: Bearer <ADMIN_JWT>"
+```
+
+`search` matches `code` or `name` (case-insensitive). Same
+`{ items, meta }` pagination shape as Locations/Users. Deactivated products
+are never hidden by default — they only disappear from the results when
+`isActive=true` is explicitly passed.
+
+## 16. Inventory Management
+
+Every endpoint requires `Authorization: Bearer <JWT>`; authorization then
+differs per endpoint (see the matrix below) rather than being one blanket
+rule for the whole module, unlike Locations/Users/Products.
+
+```
+GET    /api/inventory              any authenticated user (scope differs — see below)
+POST   /api/inventory/initialize   Administration only
+POST   /api/inventory/:id/distribute   operational categories only (Store/Lab/Ward/Pharmacy)
+POST   /api/inventory/:id/trash        operational categories only
+```
+
+| Capability | Administration | Store / Lab / Ward / Pharmacy |
+|---|---|---|
+| View own location's inventory | ✅ | ✅ |
+| View another location's inventory | ✅ (any) | ❌ |
+| Initialize inventory | ✅ | ❌ (`403`) |
+| Distribute / Trash | ❌ (`403`) | ✅ (own location only) |
+
+### View inventory
+
+```bash
+curl "http://localhost:4000/api/inventory?locationId=<id>&productId=<id>" \
+  -H "Authorization: Bearer <JWT>"
+```
+
+Administration may filter by `locationId` and/or `productId` to see any
+location's stock. **Every other category is always scoped to their own
+location** — a `locationId` they send is validated for shape but then
+silently overridden, never rejected as an error; they simply always see
+their own inventory no matter what they ask for. `productId` remains a
+usable filter for everyone. Each row includes embedded `product` and
+`location` context so the client never needs a second lookup.
+
+### Initialize (Administration only)
+
+```bash
+curl -X POST http://localhost:4000/api/inventory/initialize \
+  -H "Authorization: Bearer <ADMIN_JWT>" -H "Content-Type: application/json" \
+  -d '{"productId":"<PRODUCT_ID>","locationId":"<LOCATION_ID>","quantity":100}'
+```
+
+Both `productId` and `locationId` must reference existing records (`404`
+otherwise); `quantity` must be a positive integer (`422` otherwise).
+**This always creates a new Inventory row** — initializing the same
+product at the same location twice produces two separate rows, never a
+merged total (Product+Location is deliberately not unique; see
+PROJECT_RULES.md). There is no restriction requiring the product or
+destination location to be active.
+
+### Distribute / Trash (operational categories only)
+
+```bash
+curl -X POST http://localhost:4000/api/inventory/<INVENTORY_ID>/distribute \
+  -H "Authorization: Bearer <OPERATIONAL_JWT>" -H "Content-Type: application/json" \
+  -d '{"quantity":10}'
+```
+
+Same request shape for `.../trash`. Both:
+- reject Administration callers (`403`);
+- reject an inventory id that doesn't belong to the caller's own location
+  (`403`) — any `locationId` in the request body is ignored entirely, there
+  is no code path that reads it for ownership;
+- reject a `quantity` that isn't a positive integer (`422`), or that
+  exceeds the row's current quantity (`400`);
+- decrement the row in place — **neither operation ever creates a second
+  row or deletes the original one**, even when the resulting quantity
+  reaches `0`.
+
+### Concurrency safety
+
+Distribute and Trash share one atomic update in
+`inventory-repository.ts`:
+
+```sql
+UPDATE "Inventory"
+SET quantity = quantity - :requestedQuantity
+WHERE id = :inventoryId
+  AND "locationId" = :callerLocationId
+  AND quantity >= :requestedQuantity
+```
+
+The sufficiency check and the decrement happen as a single database
+statement, so two simultaneous requests against the same row can't both
+succeed past the available quantity — whichever commits second
+re-evaluates `quantity >= requestedQuantity` against the already-updated
+value. Verified directly: firing two concurrent 70+50 (and separately
+20+20) distribute requests against the same row always produced exactly
+one success and one clean `400`, with the final quantity always correct
+and never negative.
+
+## 17. Testing
+
+Backend integration tests use **Vitest** + **Supertest** against the real
+Express app (bound directly, no `app.listen()`) and a real, dedicated
+PostgreSQL test database — no mocked business logic.
+
+### One-time setup
+
+Create the test database (a second database inside the same local Postgres
+container used for development — never the dev database itself) and apply
+migrations to it:
+
+```bash
+docker exec -it inventory-management-postgres psql -U postgres -c "CREATE DATABASE inventory_management_test;"
+cd backend
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/inventory_management_test" npx prisma migrate deploy
+```
+
+`backend/.env.test` is already committed with matching, non-sensitive test
+values (a fake JWT secret, a low bcrypt cost for speed, test admin
+credentials) — nothing in it is a real secret, and it only ever points at
+the local test database above.
+
+### Running tests
+
+```bash
+cd backend
+npm test           # run the full suite once
+npm run test:watch # re-run on file changes
+```
+
+Every single test — not just every file — starts from an identical,
+deterministic state (one Administration Office, one admin user, nothing
+else): a global `beforeEach` truncates every table and re-bootstraps
+before each test runs, so no test depends on data left behind by another
+or on manually-created records.
+
+### Test suite layout
+
+```
+backend/tests/
+├── setup.ts                          env loading + per-test DB reset
+├── helpers/
+│   ├── bootstrap.ts                  reset/seed logic (test-only)
+│   └── test-client.ts                supertest wrapper + fixture helpers
+└── integration/
+    ├── auth.test.ts                  login, /me, JWT edge cases
+    ├── locations.test.ts             CRUD + Administration Office invariant
+    ├── users.test.ts                 CRUD + last-active-admin invariant
+    ├── products.test.ts              CRUD + code uniqueness
+    ├── inventory.test.ts             view/initialize/distribute/trash + ownership
+    ├── inventory-concurrency.test.ts atomic decrement under real races
+    ├── security.test.ts              cross-cutting privilege-escalation attempts
+    └── regression.test.ts            bootstrap idempotency + full E2E scenario
+```
+
+Run one file directly with `npx vitest run tests/integration/inventory.test.ts`.
+
+### A note on test database safety
+
+The suite refuses to run its destructive per-test reset against anything
+that doesn't look like `inventory_management_test` — a hard runtime check
+in `tests/helpers/bootstrap.ts`, independent of environment-loading order.
+This exists because of a real incident during this phase's development
+(a hoisted import caused the dev database to be wiped before the fix was
+in place — see PROJECT_RULES.md for the full account and the two-part
+fix). If you ever see this guard throw, **do not bypass it** — it means
+`DATABASE_URL` resolved to something other than the test database, and
+running anyway would delete real data.
+
+## 18. Project Phases
 
 This project is being built incrementally. Completed so far:
 
@@ -351,14 +626,13 @@ This project is being built incrementally. Completed so far:
 - [x] Phase 3 — Database Implementation
 - [x] Phase 4 — Backend Foundation
 - [x] Phase 5 — Authentication
-- [x] Phase 6 — Location Management (this phase)
-- [ ] Phase 7 — User Module
-- [ ] Phase 8 — Product Module
-- [ ] Phase 9 — Inventory Module
-- [ ] Phase 10 — API Testing
+- [x] Phase 6 — Location Management
+- [x] Phase 7 — User Management
+- [x] Phase 8 — Product Management
+- [x] Phase 9 — Inventory Management
+- [x] Phase 10 — API Testing & Security Verification (this phase)
 - [ ] Phase 11 — Frontend Foundation
-- [ ] Phase 12 — Auth UI
-- [ ] Phase 13 — Admin UI
-- [ ] Phase 14 — Operational User UI
-- [ ] Phase 15 — Integration
-- [ ] Phase 16 — Final Quality Check
+- [ ] Phase 12 — Admin UI
+- [ ] Phase 13 — Operational User UI
+- [ ] Phase 14 — Integration
+- [ ] Phase 15 — Final Quality Check
